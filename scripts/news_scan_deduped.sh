@@ -96,8 +96,24 @@ except Exception as e:
     print(f"  Warning: Could not run blogwatcher articles: {e}", file=sys.stderr)
     raw = ""
 
+# ── AI keyword filter (same logic as filter_ai_news.sh) ──────────
+SHORT_KW = re.compile(r"\b(AI|AGI|LLM|GPU|TPU|RAG|API)\b")
+LONG_KW = re.compile(
+    r"artificial intelligence|machine learning|deep learning|"
+    r"language model|GPT|Claude|Gemini|ChatGPT|OpenAI|Anthropic|"
+    r"Google AI|DeepMind|agentic|neural network|transformer|"
+    r"diffusion|generative AI|gen AI|Llama|Mistral|Hugging Face|"
+    r"inference|training|fine-tuning|open.source|NVIDIA|DeepSeek|"
+    r"Grok|xAI|Qwen|Codex|Copilot|Meta AI|Cohere|Perplexity|"
+    r"multimodal|reasoning model|robotics|autonomous|chip|"
+    r"acquisition|funding|valuation|launch|release|"
+    r"OpenClaw|Amazon Q|Bedrock|benchmark",
+    re.IGNORECASE
+)
+
 lines = raw.split("\n")
 articles = []
+filtered_out = 0
 i = 0
 
 while i < len(lines):
@@ -115,14 +131,17 @@ while i < len(lines):
             elif next_line.startswith("URL:"):
                 url = next_line[4:].strip()
         if title and url:
-            articles.append(f"{title}|{url}|{source}")
+            if SHORT_KW.search(title) or LONG_KW.search(title):
+                articles.append(f"{title}|{url}|{source}")
+            else:
+                filtered_out += 1
     i += 1
 
 with open(outpath, "w") as f:
     for a in articles:
         f.write(a + "\n")
 
-print(f"  Extracted {len(articles)} new RSS articles", file=sys.stderr)
+print(f"  Extracted {len(articles)} AI-relevant RSS articles ({filtered_out} non-AI filtered out)", file=sys.stderr)
 ' "$ARTICLES_FILE"
 
 RSS_COUNT=$(wc -l < "$ARTICLES_FILE" | tr -d ' ')
@@ -313,33 +332,11 @@ echo "════════════════════════�
 echo ""
 
 if [ "$LLM_SUCCESS" = false ] || [ ! -s "$PICKS_FILE" ]; then
-  echo "Warning: LLM curation unavailable — showing raw top articles:"
+  echo "All LLM providers failed. No curated stories to display."
+  echo "Check /tmp/llm_editor.log for details."
   echo ""
-  head -"$TOP_N" "$ENRICHED_FILE" | while IFS='|' read -r title url source rest; do
-    is_tweet=""
-    if echo "$source" | grep -q "(tweet)"; then
-      is_tweet="yes"
-    fi
-    if [ -n "$is_tweet" ]; then
-      echo "  [tweet] $title"
-    else
-      echo "  * $title"
-    fi
-    if [ -n "$url" ]; then
-      if [ -n "$is_tweet" ]; then
-        echo "    View tweet: $url"
-      else
-        echo "    Link: $url"
-      fi
-    fi
-    source_clean=$(echo "$source" | sed 's/ (tweet)//')
-    if [ -n "$source_clean" ]; then
-      echo "    Source: $source_clean"
-    fi
-    echo ""
-    echo "---"
-    echo ""
-  done
+  echo "Candidates were saved to: $PERSISTENT_CANDIDATES"
+  echo "Re-run manually: python3 $SCRIPT_DIR/llm_editor.py --file $PERSISTENT_CANDIDATES"
 else
   python3 -c '
 import sys, json
@@ -396,6 +393,34 @@ for i, line in enumerate(lines):
         print("---")
         print()
 ' "$PICKS_FILE"
+fi
+
+# ═════════════════════════════════════════════════════════════════════
+# RECORD ALL SCORED CANDIDATES TO DEDUP DB
+# ═════════════════════════════════════════════════════════════════════
+if [ -s "$SCORED_FILE" ]; then
+  python3 -c '
+import sys
+sys.path.insert(0, sys.argv[2])
+try:
+    from dedup_db import DedupDB
+    db = DedupDB()
+    articles = []
+    with open(sys.argv[1], "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("|")
+            if len(parts) >= 3:
+                articles.append({"url": parts[1], "title": parts[0], "source": parts[2]})
+    db.record_batch(articles, status="scored")
+    print(f"  Recorded {len(articles)} scored candidates to dedup DB", file=sys.stderr)
+except ImportError:
+    print("  Warning: dedup_db not available, skipping DB recording", file=sys.stderr)
+except Exception as e:
+    print(f"  Warning: DB recording failed: {e}", file=sys.stderr)
+' "$SCORED_FILE" "$SCRIPT_DIR" 2>&1
 fi
 
 # ═════════════════════════════════════════════════════════════════════

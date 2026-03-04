@@ -56,7 +56,7 @@
 - Tier 5 (Primary): Company blogs, GitHub repos, research papers
 
 ## Story Selection Rules
-1. Every scan MUST produce at least 5 stories (broaden scope if needed)
+1. Select UP TO 7 stories per scan. Quality matters more than quantity — 3 great picks are better than 7 mediocre ones. Only select stories that genuinely match the editorial focus. It is perfectly fine to return fewer stories when the candidate pool is thin.
 2. No exact duplicates of previously posted stories
 3. Same event from different angles = OK if the angle is genuinely new
 4. Prefer concrete news (X acquired Y, X launched Z) over speculation

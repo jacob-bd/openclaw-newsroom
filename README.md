@@ -23,9 +23,9 @@
 
 ---
 
-A complete, automated AI news scanning pipeline for [OpenClaw](https://github.com/openclaw/openclaw). Scans 5 data sources every 2 hours, scores and deduplicates results, enriches top articles with full text, and uses Gemini Flash as an AI editor to curate the best stories for your channel.
+A complete, automated AI news scanning pipeline for [OpenClaw](https://github.com/openclaw/openclaw). Scans 5 data sources every 2 hours, scores and deduplicates results with a persistent SQLite database, enriches top articles with full text, and uses a 3-tier LLM failover chain (Gemini Flash Lite → Grok via OpenRouter → Gemini Flash) to curate the best stories for your channel.
 
-**Pipeline cost:** ~$5/month (Gemini Flash API + Tavily free tier)
+**Pipeline cost:** ~$5/month (Gemini Flash Lite API + Tavily free tier)
 
 ---
 
@@ -38,9 +38,9 @@ OpenClaw Gateway
 ├── Cron scheduler fires every 2 hours
 │   └── Runs news_scan_deduped.sh (the orchestrator)
 │       ├── Calls 5 data source scripts (RSS, Reddit, Twitter, GitHub, Tavily)
-│       ├── Scores + deduplicates via quality_score.py
+│       ├── Scores + deduplicates via quality_score.py + dedup_db.py
 │       ├── Enriches top articles via enrich_top_articles.py
-│       └── Curates via llm_editor.py (Gemini Flash API)
+│       └── Curates via llm_editor.py (3-tier LLM failover)
 │
 ├── Agent receives the pipeline output
 │   └── Formats and delivers to your channel (Telegram, Slack, etc.)
@@ -49,6 +49,7 @@ OpenClaw Gateway
 │   └── Runs update_editorial_profile.py to learn from your approvals/rejections
 │
 └── memory/ directory
+    ├── news_dedup.db             ← SQLite dedup database (cross-scan)
     ├── editorial_profile.md      ← LLM editor reads this for guidance
     ├── editorial_decisions.md    ← Your approval/rejection log
     ├── scanner_presented.md      ← Auto-logged: what was presented
@@ -62,7 +63,7 @@ OpenClaw Gateway
 1. **Scripts live in** `~/.openclaw/workspace/scripts/` — OpenClaw's standard location for agent-callable scripts
 2. **Memory files live in** `~/.openclaw/workspace/memory/` — persistent across sessions
 3. **The cron job** uses `sessionTarget: "isolated"` so each scan gets a clean session (no context contamination)
-4. **The agent model** (e.g., Kimi K2.5) orchestrates the pipeline. The actual AI curation uses Gemini Flash directly via API — so your cron model doesn't need to be expensive
+4. **The agent model** (e.g., Kimi K2.5) orchestrates the pipeline. The actual AI curation uses a 3-tier LLM failover chain (Gemini Flash Lite → Grok → Gemini Flash) via direct API calls — so your cron model doesn't need to be expensive
 5. **Delivery** is handled by OpenClaw's channel system (Telegram, Slack, etc.)
 
 **Not using OpenClaw?** The scripts work standalone too — just run `./news_scan_deduped.sh` from a regular cron job or shell. The only OpenClaw-specific parts are the cron job setup and channel delivery.
@@ -77,7 +78,7 @@ OpenClaw Gateway
 │                    (Main Orchestrator)                           │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  [1] RSS Feeds          ──→  filter_ai_news.sh (25 feeds)       │
+│  [1] RSS Feeds          ──→  inline AI keyword filter (25 feeds) │
 │  [2] Reddit JSON API    ──→  fetch_reddit_news.py (13 subs)     │
 │  [3] Twitter/X          ──→  scan_twitter_ai.sh (bird CLI)      │
 │                          ──→  fetch_twitter_api.py (API search)  │
@@ -88,16 +89,21 @@ OpenClaw Gateway
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  quality_score.py   → Score + dedup (80% title similarity)      │
+│  dedup_db.py        → SQLite cross-scan dedup (URL + title)     │
+│                       Persistent memory across all runs         │
+│                                                                 │
+│  quality_score.py   → Score + within-batch dedup (80%)          │
+│                       + cross-scan dedup via SQLite             │
 │                       Output: top 50 scored candidates          │
 │                                                                 │
 │  enrich_top_articles.py → Fetch full text for top 8 articles    │
 │                           CF Markdown preferred, HTML fallback  │
 │                                                                 │
-│  llm_editor.py      → Gemini Flash editorial curation           │
+│  llm_editor.py      → 3-tier LLM failover chain                │
+│                       Flash Lite → Grok (OpenRouter) → Flash   │
 │                       Reads editorial_profile.md for guidance   │
-│                       Checks news_log.md to avoid repeats       │
-│                       Output: top 7 ranked picks (JSON)         │
+│                       SQLite pre-filter before LLM call         │
+│                       Output: up to 7 ranked picks (JSON)       │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -114,7 +120,8 @@ OpenClaw Gateway
 ### API Keys (set as environment variables)
 | Key | Required? | Purpose | Free Tier |
 |-----|-----------|---------|-----------|
-| `GEMINI_API_KEY` | Yes | Gemini Flash for LLM editorial curation | Google AI Studio — generous free tier |
+| `GEMINI_API_KEY` | Yes | Gemini Flash Lite / Flash for LLM curation | Google AI Studio — generous free tier |
+| `OPENROUTER_API_KEY` | Recommended | Grok 4.1 Fast failover (via OpenRouter) | Pay-per-token (cheap) |
 | `GH_TOKEN` | Recommended | GitHub API (5000 req/h vs 60/h unauthenticated) | GitHub personal access token (free) |
 | `TAVILY_API_KEY` | Optional | Tavily web search for breaking news | 1000 queries/month free |
 | `TWITTERAPI_IO_KEY` | Optional | twitterapi.io keyword search supplement | Paid (small monthly fee) |
@@ -184,7 +191,19 @@ Edit `~/.openclaw/workspace/memory/editorial_profile.md` to reflect your channel
 
 This profile is read by the LLM editor on every scan and directly influences story selection.
 
-### Step 4: Set Environment Variables
+### Step 4: Seed the Dedup Database
+
+Import your existing post history so the dedup system has context from day one:
+
+```bash
+cd ~/.openclaw/workspace/scripts
+python3 dedup_db.py --seed
+python3 dedup_db.py --stats
+```
+
+If this is a fresh install with no history, skip this step — the database will populate automatically as the pipeline runs.
+
+### Step 5: Set Environment Variables
 
 Add API keys to your OpenClaw LaunchAgent plist (macOS):
 
@@ -192,6 +211,8 @@ Add API keys to your OpenClaw LaunchAgent plist (macOS):
 # Add to ~/Library/LaunchAgents/ai.openclaw.gateway.plist under EnvironmentVariables:
 # <key>GEMINI_API_KEY</key>
 # <string>your-gemini-api-key</string>
+# <key>OPENROUTER_API_KEY</key>
+# <string>your-openrouter-key</string>
 # <key>GH_TOKEN</key>
 # <string>your-github-token</string>
 # <key>TAVILY_API_KEY</key>
@@ -207,11 +228,12 @@ Or export them in your shell for testing:
 
 ```bash
 export GEMINI_API_KEY="your-key"
+export OPENROUTER_API_KEY="your-key"
 export GH_TOKEN="your-token"
 export TAVILY_API_KEY="your-key"
 ```
 
-### Step 5: Create the Cron Job
+### Step 6: Create the Cron Job
 
 Add the news scan as an OpenClaw cron job:
 
@@ -231,7 +253,7 @@ openclaw cron add \
 
 **Model choice:** The cron job uses a cheap/mid-tier model (like Kimi K2.5) to orchestrate the pipeline. The actual AI curation happens via Gemini Flash API directly (called by `llm_editor.py`), so the cron model doesn't need to be expensive.
 
-### Step 6: Test the Pipeline
+### Step 7: Test the Pipeline
 
 Run a manual test:
 
@@ -260,8 +282,10 @@ You should see output like:
 ### 1. `news_scan_deduped.sh` — Main Orchestrator
 The master script that calls everything else in sequence. Collects articles from all 5 sources, pipes through scoring/enrichment/LLM, and formats output. All sources are best-effort — if one fails, the pipeline continues with what it has.
 
-### 2. `filter_ai_news.sh` — RSS Keyword Filter
+### 2. `filter_ai_news.sh` — RSS Keyword Filter (standalone)
 Reads articles from blogwatcher, filters by AI-related keywords (with word-boundary matching for short keywords like "AI" to avoid false positives), assigns source tiers, and filters out Reddit noise (questions, rants, memes).
+
+> **Note:** As of v2, the main orchestrator (`news_scan_deduped.sh`) handles AI keyword filtering inline during RSS extraction. This script still exists for standalone use or debugging, but is no longer called by the pipeline.
 
 ### 3. `fetch_reddit_news.py` — Reddit JSON API Scanner
 Fetches posts from 13 AI-related subreddits using Reddit's public JSON API (no auth needed). Features:
@@ -290,29 +314,37 @@ Maintains state between runs to calculate star velocity.
 ### 7. `fetch_web_news.py` — Tavily Web Search
 Catches breaking news that RSS feeds miss. 5 focused queries, 2-day freshness filter. Skips domains already covered by RSS (Reddit, Twitter, GitHub, YouTube, arxiv). Filters out homepage URLs.
 
-### 8. `quality_score.py` — Scoring + Deduplication
+### 8. `dedup_db.py` — SQLite Cross-Scan Dedup Database
+Persistent dedup memory shared across all pipeline runs. Stores normalized URLs and titles from every scan in `~/.openclaw/workspace/memory/news_dedup.db`. Features:
+- URL normalization (strips query params, fragments, www prefix, trailing punctuation)
+- Title similarity matching (75% threshold via SequenceMatcher, 2-day window)
+- Bulk check API for efficient pre-filtering
+- CLI for seeding from historical logs, checking URLs/titles, and viewing stats
+
+### 9. `quality_score.py` — Scoring + Deduplication
 Scores every article based on:
 - Source tier (wire services get +5, tech press +3, etc.)
 - High-value keywords (acquisitions, billion, launch, security, etc.)
 - Breaking news signals (exclusive, confirmed, first look, etc.)
 - Title quality (length heuristic)
 
-Deduplicates by title similarity (80% threshold using SequenceMatcher). Outputs top 50.
+Two-stage dedup: within-batch similarity (80% threshold) followed by cross-scan dedup against the SQLite database. Outputs top 50.
 
-### 9. `enrich_top_articles.py` — Full Text Fetcher
+### 10. `enrich_top_articles.py` — Full Text Fetcher
 Fetches full article text for the top 8 scored articles. Tries Cloudflare Markdown for Agents first (clean markdown), falls back to HTML extraction. Skips paywalled sites. 1200 character cap per article.
 
-### 10. `llm_editor.py` — LLM Editorial Curation
-The AI brain of the pipeline. Sends all scored candidates + editorial profile + recent post history to Gemini Flash. The LLM selects the top N stories, ranks them, assigns categories, and writes 1-sentence summaries.
+### 11. `llm_editor.py` — LLM Editorial Curation
+The AI brain of the pipeline. Sends all scored candidates + editorial profile + recent post history to a 3-tier LLM failover chain. The LLM selects up to 7 stories, ranks them, assigns categories, and writes 1-sentence summaries.
 
 Features:
-- Deterministic URL pre-filter (skips already-posted URLs before calling the LLM)
+- **3-tier failover chain:** Gemini 3.1 Flash Lite → Grok 4.1 Fast (OpenRouter) → Gemini 3 Flash Preview. Alternates providers to avoid double failure.
+- SQLite pre-filter (skips already-seen URLs and similar titles before calling the LLM)
 - Editorial profile integration (learns your preferences over time)
-- Structured JSON output with validation
-- Graceful fallback to raw scoring if LLM fails
+- Structured JSON output with validation and robust parsing (handles markdown fences, dict wrappers, etc.)
+- Records all picks to the SQLite dedup database after selection
 - Logs all presented stories to `scanner_presented.md`
 
-### 11. `update_editorial_profile.py` — Profile Updater
+### 12. `update_editorial_profile.py` — Profile Updater
 Runs nightly. Analyzes your approval/rejection patterns and updates the editorial profile's stats section. Also identifies "blind spots" — topics you manually seek out but the scanner doesn't catch.
 
 ---
@@ -343,8 +375,8 @@ Add to the `RELEASE_REPOS` list in `github_trending.py`:
 "owner/repo-name",
 ```
 
-### Changing the LLM Model
-Edit `GEMINI_MODEL` in `llm_editor.py`. Any Gemini model works. Flash is recommended for cost.
+### Changing the LLM Models
+Edit the `FAILOVER_CHAIN` list in `llm_editor.py`. Each entry specifies a model name, API type (`gemini` or `openrouter`), environment variable for the API key, and timeout. The chain is tried in order — the first provider that responds wins.
 
 ### Adjusting Scan Frequency
 Edit the cron expression:
@@ -359,18 +391,21 @@ openclaw cron edit <job-id> --cron "0 */3 * * *"  # every 3 hours
 ```
 openclaw-news-scan/
 ├── README.md                              # This file
+├── CHANGELOG.md                           # Version history and migration guide
 ├── scripts/
-│   ├── news_scan_deduped.sh              # Main orchestrator
-│   ├── filter_ai_news.sh                 # RSS keyword filter
+│   ├── news_scan_deduped.sh              # Main orchestrator (inline AI filter)
+│   ├── dedup_db.py                       # SQLite cross-scan dedup database
+│   ├── quality_score.py                  # Scoring + two-stage dedup
+│   ├── enrich_top_articles.py            # Full text fetcher
+│   ├── llm_editor.py                     # LLM curation (3-tier failover)
+│   ├── filter_ai_news.sh                 # RSS keyword filter (standalone)
 │   ├── fetch_reddit_news.py              # Reddit JSON API
 │   ├── scan_twitter_ai.sh               # Twitter bird CLI
 │   ├── fetch_twitter_api.py              # twitterapi.io search
 │   ├── github_trending.py               # GitHub trending + releases
 │   ├── fetch_web_news.py                # Tavily web search
-│   ├── quality_score.py                 # Scoring + dedup
-│   ├── enrich_top_articles.py           # Full text fetcher
-│   ├── llm_editor.py                    # LLM editorial curation
-│   └── update_editorial_profile.py      # Editorial profile updater
+│   ├── update_editorial_profile.py      # Editorial profile updater
+│   └── test_components.py               # Unit tests (68 tests)
 └── config/
     └── editorial_profile_template.md     # Template — customize for your channel
 ```
@@ -380,14 +415,14 @@ openclaw-news-scan/
 ## Pipeline Flow Summary
 
 ```
-RSS (25 feeds) ─────────┐
-Reddit (13 subs) ───────┤
-Twitter (bird + API) ───┤──→ quality_score.py ──→ enrich_top_articles.py ──→ llm_editor.py ──→ Output
-GitHub (trending+rel) ──┤       (max 50)              (max 8)              (Gemini Flash)
-Tavily (5 queries) ─────┘
+RSS (25 feeds) ─────────┐                                                   ┌─ Gemini Flash Lite
+Reddit (13 subs) ───────┤    AI keyword     quality_score.py   enrich_top   │
+Twitter (bird + API) ───┤──→ pre-filter ──→ + dedup_db.py  ──→ articles ──→ ├─ Grok (OpenRouter) ──→ Output
+GitHub (trending+rel) ──┤   (inline)        (score + dedup)    (max 8)      │  (failover chain)
+Tavily (5 queries) ─────┘                    (max 50)                       └─ Gemini Flash Preview
 ```
 
-**Typical run:** ~100 raw articles → 50 scored → 8 enriched → 5-7 curated picks
+**Typical run:** ~100 raw → ~50 after AI filter → 50 scored → 8 enriched → 3-7 curated picks
 
 ---
 
@@ -395,7 +430,8 @@ Tavily (5 queries) ─────┘
 
 | Component | Monthly Cost | Notes |
 |-----------|-------------|-------|
-| Gemini Flash API | ~$2-3/month | ~7 calls/day, ~30K tokens each |
+| Gemini Flash Lite API | ~$1-2/month | Primary LLM — ~7 calls/day, ~30K tokens each |
+| OpenRouter (Grok failover) | ~$0-1/month | Only used when Gemini fails |
 | Tavily API | Free | 1000 queries/month free tier covers it |
 | GitHub API | Free | Personal access token, 5000 req/h |
 | twitterapi.io | ~$10/month | Optional — bird CLI is free |
@@ -408,15 +444,17 @@ Tavily (5 queries) ─────┘
 
 | Issue | Fix |
 |-------|-----|
-| "GEMINI_API_KEY not set" | Add to LaunchAgent plist or export in shell |
+| "GEMINI_API_KEY not set" | Add to LaunchAgent plist or export in shell. Pipeline warns but continues (failover may use OpenRouter). |
 | Reddit 429 (rate limit) | Normal with 2h spacing. Reduce subreddits or increase --hours |
 | Reddit 404 on a sub | Sub may be private/quarantined. Remove from config. |
 | bird CLI not found | Install bird or remove scan_twitter_ai.sh call |
 | "No new stories found" | RSS feeds may all be read. Wait for new articles. |
-| LLM editor timeout | Increase TIMEOUT_SEC in llm_editor.py |
+| All LLM providers failed | Check that `GEMINI_API_KEY` and/or `OPENROUTER_API_KEY` are set. The pipeline saves candidates to a file for manual re-run. |
+| LLM editor timeout | Increase timeout values in the `FAILOVER_CHAIN` in `llm_editor.py` |
 | Pipeline takes too long | Increase cron timeout: `openclaw cron edit <id> --timeout 120` |
 | GitHub rate limit | Set GH_TOKEN env var for 5000 req/h (vs 60/h) |
-| Duplicate stories | Adjust --dedup-threshold in quality_score.py (default 0.80) |
+| Duplicate stories | SQLite dedup handles this automatically. Run `python3 dedup_db.py --seed` to import historical posts. Check DB status: `python3 dedup_db.py --stats` |
+| Non-AI articles leaking | The inline AI keyword filter should catch these. Check the keyword patterns in `news_scan_deduped.sh` and add missing terms. |
 
 ---
 

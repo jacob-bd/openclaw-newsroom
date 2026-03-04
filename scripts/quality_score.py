@@ -17,6 +17,12 @@ import re
 import argparse
 from difflib import SequenceMatcher
 
+try:
+    from dedup_db import DedupDB, normalize_url
+    HAS_DEDUP_DB = True
+except ImportError:
+    HAS_DEDUP_DB = False
+
 # ── Source priority scoring ──────────────────────────────────────────
 # Higher = better. Customize to match your blogwatcher feed names.
 PRIORITY_SOURCES = {
@@ -112,6 +118,29 @@ def deduplicate(articles, threshold=0.80):
     return unique
 
 
+def cross_scan_dedup(articles):
+    """Remove articles already seen in previous scans (via SQLite DB)."""
+    if not HAS_DEDUP_DB:
+        print("  Warning: dedup_db not available, skipping cross-scan dedup", file=sys.stderr)
+        return articles
+
+    db = DedupDB()
+    article_dicts = [{"url": a["url"], "title": a["title"]} for a in articles]
+    new_dicts, dupe_dicts, url_dupes, title_dupes = db.bulk_check(article_dicts)
+
+    # Build set of new URLs for filtering
+    new_urls = set()
+    for d in new_dicts:
+        new_urls.add(normalize_url(d["url"]))
+    filtered = [a for a in articles if normalize_url(a["url"]) in new_urls]
+
+    removed = len(articles) - len(filtered)
+    if removed > 0:
+        print("  Cross-scan dedup: removed %d (%d URL, %d title matches)" % (removed, url_dupes, title_dupes), file=sys.stderr)
+
+    return filtered
+
+
 def main():
     parser = argparse.ArgumentParser(description="Quality scoring pre-filter")
     parser.add_argument('--input', '-i', required=True, help='Input pipe-delimited file')
@@ -154,6 +183,7 @@ def main():
 
     articles.sort(key=lambda x: -x['score'])
     unique = deduplicate(articles, args.dedup_threshold)
+    unique = cross_scan_dedup(unique)
     unique.sort(key=lambda x: -x['score'])
     output = unique[:args.max]
 

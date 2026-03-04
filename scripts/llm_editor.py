@@ -31,6 +31,12 @@ import urllib.error
 from datetime import datetime
 from pathlib import Path
 
+try:
+    from dedup_db import DedupDB, normalize_url
+    HAS_DEDUP_DB = True
+except ImportError:
+    HAS_DEDUP_DB = False
+
 # ── Paths (customize to your workspace) ──────────────────────────────
 WORKSPACE = Path(os.environ.get("OPENCLAW_WORKSPACE",
                                 os.path.expanduser("~/.openclaw/workspace")))
@@ -48,6 +54,31 @@ GEMINI_URL = (
 TEMPERATURE = 0.3
 TIMEOUT_SEC = 120
 MAX_ARTICLES = 500
+
+# ── Failover LLM chain ──────────────────────────────────────────────
+FAILOVER_CHAIN = [
+    {
+        "name": "Gemini 3.1 Flash Lite",
+        "model": "gemini-3.1-flash-lite-preview",
+        "api": "gemini",
+        "env_key": "GEMINI_API_KEY",
+        "timeout": 120,
+    },
+    {
+        "name": "OpenRouter (Grok 4.1 Fast)",
+        "model": "x-ai/grok-4.1-fast",
+        "api": "openrouter",
+        "env_key": "OPENROUTER_API_KEY",
+        "timeout": 90,
+    },
+    {
+        "name": "Gemini 3 Flash Preview",
+        "model": "gemini-3-flash-preview",
+        "api": "gemini",
+        "env_key": "GEMINI_API_KEY",
+        "timeout": 120,
+    },
+]
 VALID_CATEGORIES = {
     "ai_product", "m_and_a", "model_release", "security", "geopolitics",
     "github_trending", "gaming", "fintech", "hardware", "open_source", "other"
@@ -101,9 +132,18 @@ def load_file_safe(path, tail_lines=None):
 
 def filter_already_posted(articles):
     """
-    Deterministic URL pre-filter: remove candidates whose URL already
-    appears in news_log.md or scanner_presented.md.
+    Deterministic pre-filter using SQLite dedup database.
+    Falls back to text-file URL matching if dedup_db unavailable.
     """
+    if HAS_DEDUP_DB:
+        db = DedupDB()
+        new, dupes, url_dupes, title_dupes = db.bulk_check(articles)
+        if dupes:
+            log("Pre-filtered %d candidates via SQLite (%d URL, %d title matches)" % (
+                len(dupes), url_dupes, title_dupes))
+        return new
+
+    # Fallback: original text-file matching
     full_log = load_file_safe(NEWS_LOG)
     if not full_log:
         return articles
@@ -115,9 +155,6 @@ def filter_already_posted(articles):
     for text in [full_log, presented_log]:
         for url in url_pattern.findall(text):
             url = url.rstrip(".,;:)")
-            # Skip your own channel links (customize this pattern)
-            # if "t.me/yourchannel" in url:
-            #     continue
             posted_urls.add(url)
 
     if not posted_urls:
@@ -128,12 +165,12 @@ def filter_already_posted(articles):
     for a in articles:
         candidate_url = a["url"].rstrip(".,;:)")
         if candidate_url in posted_urls:
-            log(f"  PRE-FILTERED (already posted): {a['title'][:60]}")
+            log("  PRE-FILTERED (already posted): %s" % a['title'][:60])
             removed += 1
         else:
             filtered.append(a)
 
-    log(f"Pre-filtered {removed} candidates (already posted)")
+    log("Pre-filtered %d candidates (already posted)" % removed)
     return filtered
 
 
@@ -169,11 +206,11 @@ the top {top_n} stories from the candidate list below.
 {github_text}
 
 ## Your Task
-Select exactly {top_n} stories from the candidates above. Rank them by
+Select UP TO {top_n} stories from the candidates above. Rank them by
 newsworthiness for the target audience.
 
 ## Rules
-1. Return EXACTLY {top_n} stories — no more, no fewer.
+1. Return UP TO {top_n} stories. Quality matters more than quantity — 3 great picks are better than 7 mediocre ones.
 2. Do NOT pick stories that duplicate recently posted stories (same event).
    If a candidate covers the SAME EVENT as a recently posted story — even
    from a different source or with a different headline — do NOT pick it.
@@ -187,7 +224,7 @@ newsworthiness for the target audience.
    github_trending, gaming, fintech, hardware, open_source, other
 
 ## Required JSON Output Format
-Return a JSON array of exactly {top_n} objects, each with these fields:
+Return a JSON array of your selected stories (up to {top_n}), each with these fields:
 [
   {{
     "rank": 1,
@@ -266,37 +303,171 @@ def call_gemini(prompt, api_key):
         return None
 
 
-def fallback_picks(articles, github_articles, top_n):
-    log("FALLBACK: Using raw article order (no LLM judgment)")
-    all_candidates = articles.copy()
-    if github_articles:
-        all_candidates.extend(github_articles)
-
-    picks = []
-    seen_sources = {}
-    for a in all_candidates:
-        src = a["source"]
-        if seen_sources.get(src, 0) >= 2:
+def call_llm_with_failover(prompt, articles, github_articles, editorial_profile, recent_posts, top_n):
+    """
+    Try LLM providers in sequence: Gemini Flash -> Gemini Flash Lite -> OpenRouter.
+    Each step may reduce candidate count for speed.
+    """
+    for i, provider in enumerate(FAILOVER_CHAIN):
+        api_key = os.environ.get(provider["env_key"])
+        if not api_key:
+            log("  Skipping %s: %s not set" % (provider["name"], provider["env_key"]))
             continue
-        seen_sources[src] = seen_sources.get(src, 0) + 1
-        if "github.com" in a["url"]:
-            article_type = "github"
-        elif "x.com/" in a.get("url", "") or "twitter.com/" in a.get("url", "") or "X/" in a.get("source", ""):
-            article_type = "twitter"
+
+        log("Trying %s (model: %s, timeout: %ds)" % (
+            provider["name"], provider["model"], provider["timeout"]))
+
+        # For later failovers, reduce candidate list for speed
+        current_articles = articles
+        current_github = github_articles
+        if i >= 1:
+            current_articles = articles[:30]
+            current_github = github_articles[:5] if github_articles else []
+
+        # Rebuild prompt with current candidates
+        current_prompt = build_prompt(
+            current_articles, current_github, editorial_profile, recent_posts, top_n
+        )
+
+        if provider["api"] == "gemini":
+            model_url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                "%s:generateContent" % provider["model"]
+            )
+            picks = _call_gemini_api(current_prompt, api_key, model_url, provider["timeout"])
+        elif provider["api"] == "openrouter":
+            picks = _call_openrouter_api(current_prompt, api_key, provider["model"], provider["timeout"])
         else:
-            article_type = "rss"
-        picks.append({
-            "rank": len(picks) + 1,
-            "title": a["title"],
-            "url": a["url"],
-            "source": a["source"],
-            "type": article_type,
-            "summary": "(Fallback: no AI summary available)",
-            "category": "other",
-        })
-        if len(picks) >= top_n:
-            break
-    return picks
+            continue
+
+        if picks is not None:
+            log("  %s returned %d picks" % (provider["name"], len(picks)))
+            return picks
+
+        log("  %s failed, trying next..." % provider["name"])
+
+    log("ERROR: All LLM providers failed")
+    return None
+
+
+def _call_gemini_api(prompt, api_key, model_url, timeout):
+    """Call a Gemini API model. Returns parsed picks list or None."""
+    url = "%s?key=%s" % (model_url, api_key)
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": TEMPERATURE,
+            "responseMimeType": "application/json",
+        }
+    }
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    token_est = estimate_tokens(prompt)
+    log("  Sending ~%d tokens to Gemini API" % token_est)
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8")
+            result = json.loads(body)
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8") if e.fp else "(no body)"
+        log("  Gemini API HTTP error %d: %s" % (e.code, error_body[:500]))
+        return None
+    except urllib.error.URLError as e:
+        log("  Gemini API connection error: %s" % e.reason)
+        return None
+    except Exception as e:
+        log("  Gemini API call failed: %s" % e)
+        return None
+
+    try:
+        text = result["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError) as e:
+        log("  Unexpected Gemini response structure: %s" % e)
+        return None
+
+    return _parse_llm_json(text)
+
+
+def _call_openrouter_api(prompt, api_key, model, timeout):
+    """Call OpenRouter API. Returns parsed picks list or None."""
+    url = "https://openrouter.ai/api/v1/chat/completions"
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": TEMPERATURE,
+    }
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer %s" % api_key,
+        },
+        method="POST",
+    )
+
+    token_est = estimate_tokens(prompt)
+    log("  Sending ~%d tokens to OpenRouter (%s)" % (token_est, model))
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8")
+            result = json.loads(body)
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8") if e.fp else "(no body)"
+        log("  OpenRouter HTTP error %d: %s" % (e.code, error_body[:500]))
+        return None
+    except urllib.error.URLError as e:
+        log("  OpenRouter connection error: %s" % e.reason)
+        return None
+    except Exception as e:
+        log("  OpenRouter call failed: %s" % e)
+        return None
+
+    try:
+        text = result["choices"][0]["message"]["content"]
+    except (KeyError, IndexError) as e:
+        log("  Unexpected OpenRouter response structure: %s" % e)
+        return None
+
+    return _parse_llm_json(text)
+
+
+def _parse_llm_json(text):
+    """Parse LLM response text into a list of picks."""
+    try:
+        picks = json.loads(text)
+        if isinstance(picks, list):
+            return picks
+        if isinstance(picks, dict) and "stories" in picks:
+            return picks["stories"]
+        if isinstance(picks, dict):
+            # Try to find a list value in the dict
+            for v in picks.values():
+                if isinstance(v, list):
+                    return v
+        return None
+    except json.JSONDecodeError:
+        match = re.search(r'\[\s*\{.*?\}\s*\]', text, re.DOTALL)
+        if match:
+            try:
+                picks = json.loads(match.group())
+                if isinstance(picks, list):
+                    return picks
+            except json.JSONDecodeError:
+                pass
+        log("  Could not parse LLM response. First 500 chars: %s" % text[:500])
+        return None
 
 
 def validate_picks(picks, top_n):
@@ -362,8 +533,7 @@ def main():
 
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        log("ERROR: GEMINI_API_KEY environment variable not set")
-        sys.exit(1)
+        log("WARNING: GEMINI_API_KEY not set (failover providers may still work)")
 
     top_n = int(os.environ.get("TOP_N", "7"))
     log(f"Configuration: top_n={top_n}, model={GEMINI_MODEL}")
@@ -418,18 +588,28 @@ def main():
         print(prompt, file=sys.stderr)
         return
 
-    picks = call_gemini(prompt, api_key)
+    picks = call_llm_with_failover(
+        prompt, articles, github_articles, editorial_profile, recent_posts, top_n
+    )
 
     if picks is None:
-        picks = fallback_picks(articles, github_articles, top_n)
-    else:
-        log(f"LLM returned {len(picks)} picks")
-        picks = validate_picks(picks, top_n)
+        log("ERROR: All LLM providers failed. No stories to output.")
+        return 1
+
+    picks = validate_picks(picks, top_n)
 
     for pick in picks:
         print(json.dumps(pick, ensure_ascii=False))
 
     log_to_scanner_presented(picks)
+
+    # Record picks to SQLite dedup database
+    if HAS_DEDUP_DB:
+        db = DedupDB()
+        pick_articles = [{"url": p["url"], "title": p["title"], "source": p.get("source", "")} for p in picks]
+        db.record_batch(pick_articles, status="presented")
+        log("Recorded %d picks to dedup database" % len(picks))
+
     log(f"Done. {len(picks)} stories selected.")
 
 
