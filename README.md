@@ -1,5 +1,7 @@
 # OpenClaw Automated News Scanner
 
+![Version](https://img.shields.io/badge/version-v2.1-blue) [![Changelog](https://img.shields.io/badge/changelog-view-lightgrey)](CHANGELOG.md)
+
 <a href="https://t.me/genaispot"><img src="assets/gen-ai-spotlight-logo.jpg" width="120" align="left" style="margin-right: 16px;" /></a>
 
 **See it in action:** This pipeline powers [Gen AI Spotlight](https://t.me/genaispot) on Telegram — a fully automated AI news channel. Join to see what the output looks like in production.
