@@ -127,6 +127,7 @@ OpenClaw Gateway
 | `GH_TOKEN` | Recommended | GitHub API (5000 req/h vs 60/h unauthenticated) | GitHub personal access token (free) |
 | `TAVILY_API_KEY` | Optional | Tavily web search for breaking news | 1000 queries/month free |
 | `TWITTERAPI_IO_KEY` | Optional | twitterapi.io keyword search supplement | Paid (small monthly fee) |
+| `XQUIK_API_KEY` | Optional | Xquik keyword search supplement with `--provider xquik` | Requires Xquik API access |
 
 ### Optional Tools
 - **bird** — Twitter/X CLI tool (for `scan_twitter_ai.sh`). Install: `npm install -g @steipete/bird` or `brew install steipete/tap/bird` — see [bird.fast](https://bird.fast). If not installed, the Twitter bird CLI source is skipped gracefully.
@@ -306,8 +307,8 @@ Scans official AI company accounts, tech reporters/leakers, and CEO accounts usi
 - Tier 2: Reporters and leakers (break news first)
 - Tier 3: CEOs (context, not breaking news)
 
-### 5. `fetch_twitter_api.py` — twitterapi.io Keyword Search
-Supplements bird CLI with keyword-based search. Uses engagement filtering (50+ likes or 5000+ followers) to cut noise. Properly tags tweet-only stories (no external article URL).
+### 5. `fetch_twitter_api.py` - X/Twitter API Keyword Search
+Supplements bird CLI with keyword-based search. Defaults to twitterapi.io when `TWITTERAPI_IO_KEY` is set; run with `--provider xquik` and `XQUIK_API_KEY` to use Xquik instead. Uses engagement filtering (50+ likes or 5000+ followers) to cut noise. Properly tags tweet-only stories (no external article URL).
 
 ### 6. `github_trending.py` — GitHub Trending + Releases
 Three strategies:
