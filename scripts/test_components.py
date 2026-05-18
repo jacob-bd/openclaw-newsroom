@@ -273,6 +273,87 @@ test("API standalone - should match",
 
 # ==============================================================
 print("\n" + "=" * 60)
+print("COMPONENT 5: fetch_twitter_api.py")
+print("=" * 60)
+
+import fetch_twitter_api
+
+print("\n[Provider Selection]")
+test("Auto keeps twitterapi.io when both keys exist",
+     fetch_twitter_api.resolve_provider(
+         "auto", {"TWITTERAPI_IO_KEY": "tw", "XQUIK_API_KEY": "xq"}
+     ) == ("twitterapi", "tw"))
+test("Auto uses Xquik when only Xquik key exists",
+     fetch_twitter_api.resolve_provider("auto", {"XQUIK_API_KEY": "xq"})
+     == ("xquik", "xq"))
+test("Explicit Xquik reads XQUIK_API_KEY",
+     fetch_twitter_api.resolve_provider("xquik", {"XQUIK_API_KEY": "xq"})
+     == ("xquik", "xq"))
+
+
+class _FakeResp:
+    def __init__(self, body):
+        self._body = json.dumps(body).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return self._body
+
+
+print("\n[Xquik Search Request]")
+captured = {}
+original_urlopen = fetch_twitter_api.urlopen
+
+
+def _fake_urlopen(req, timeout, context):
+    captured["url"] = req.full_url
+    captured["headers"] = req.headers
+    return _FakeResp({"tweets": [{"id": "1", "text": "AI launch"}]})
+
+
+try:
+    fetch_twitter_api.urlopen = _fake_urlopen
+    xquik_tweets = fetch_twitter_api.search_xquik("AI launch", "xq", max_results=7)
+finally:
+    fetch_twitter_api.urlopen = original_urlopen
+
+test("Xquik search returns tweets",
+     xquik_tweets == [{"id": "1", "text": "AI launch"}])
+test("Xquik search hits /x/tweets/search",
+     "/x/tweets/search?" in captured.get("url", ""))
+test("Xquik search passes limit",
+     "limit=7" in captured.get("url", ""))
+test("Xquik search sends API key",
+     captured.get("headers", {}).get("X-api-key") == "xq")
+test("Xquik search sends contract header",
+     captured.get("headers", {}).get("Xquik-api-contract") == "2026-04-29")
+
+print("\n[Tweet URL Extraction]")
+xquik_tweet = {
+    "id": "123",
+    "author": {"username": "openai"},
+    "entities": {"urls": []},
+}
+tweet_url, tweet_only = fetch_twitter_api.extract_url_from_tweet(xquik_tweet)
+test("Xquik author username builds tweet URL",
+     tweet_url == "https://x.com/openai/status/123" and tweet_only)
+
+external_tweet = {
+    "id": "123",
+    "author": {"username": "openai"},
+    "entities": {"urls": [{"expandedUrl": "https://openai.com/news"}]},
+}
+external_url, external_only = fetch_twitter_api.extract_url_from_tweet(external_tweet)
+test("expandedUrl external link is preferred",
+     external_url == "https://openai.com/news" and not external_only)
+
+# ==============================================================
+print("\n" + "=" * 60)
 print("SUMMARY")
 print("=" * 60)
 print("Total: %d passed, %d failed" % (PASS, FAIL))
