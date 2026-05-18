@@ -1,6 +1,6 @@
 # OpenClaw Automated News Scanner
 
-![Version](https://img.shields.io/badge/version-v2.1-blue) [![Changelog](https://img.shields.io/badge/changelog-view-lightgrey)](CHANGELOG.md)
+![Version](https://img.shields.io/badge/version-v2.2-blue) [![Changelog](https://img.shields.io/badge/changelog-view-lightgrey)](CHANGELOG.md)
 
 <a href="https://t.me/genaispot"><img src="assets/gen-ai-spotlight-logo.jpg" width="120" align="left" style="margin-right: 16px;" /></a>
 

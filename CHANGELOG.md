@@ -4,6 +4,18 @@ All notable changes to the OpenClaw News Scanner pipeline are documented here.
 
 ---
 
+## [v2.2] — 2026-05-18
+
+### Added: Xquik Twitter Search Provider
+
+**What changed:**
+
+- **Optional Xquik Provider in `fetch_twitter_api.py`** — Added support for Xquik as an alternative keyword-based Twitter search provider.
+- You can now use the `--provider` flag with options `auto`, `twitterapi`, and `xquik` to fetch keyword-driven AI tweets. 
+- A huge **thank you** to [@kriptoburak](https://github.com/kriptoburak) for contributing this feature!
+
+---
+
 ## [v2.1] — 2026-03-05
 
 ### Added: agent-browser Fallback for Article Enrichment
