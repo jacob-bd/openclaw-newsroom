@@ -1,6 +1,6 @@
 # OpenClaw Automated News Scanner
 
-![Version](https://img.shields.io/badge/version-v2.2-blue) [![Changelog](https://img.shields.io/badge/changelog-view-lightgrey)](CHANGELOG.md)
+![Version](https://img.shields.io/badge/version-v2.2-blue) [![Changelog](https://img.shields.io/badge/changelog-view-lightgrey)](CHANGELOG.md) [![NHS Agentic Readiness](https://nothumansearch.ai/badge/xquik.com.svg)](https://nothumansearch.ai/site/xquik.com)
 
 <a href="https://t.me/genaispot"><img src="assets/gen-ai-spotlight-logo.jpg" width="120" align="left" style="margin-right: 16px;" /></a>
 
@@ -152,9 +152,9 @@ chmod +x ~/.openclaw/workspace/scripts/scan_twitter_ai.sh
 Install blogwatcher and add your RSS feeds. Here's a recommended starter set:
 
 ```bash
-# Wire services (Tier 1 — highest trust)
-blogwatcher add "Reuters Tech" "https://www.reuters.com/technology/rss"
-blogwatcher add "Axios AI" "https://api.axios.com/feed/top/technology"
+# Broad tech and AI feeds (Tier 1 - high trust)
+blogwatcher add "BBC Technology" "https://feeds.bbci.co.uk/news/technology/rss.xml"
+blogwatcher add "Guardian AI" "https://www.theguardian.com/technology/artificialintelligenceai/rss"
 
 # Tech press (Tier 2)
 blogwatcher add "TechCrunch AI" "https://techcrunch.com/category/artificial-intelligence/feed/"
@@ -222,6 +222,8 @@ Add API keys to your OpenClaw LaunchAgent plist (macOS):
 # <string>your-tavily-key</string>
 # <key>TWITTERAPI_IO_KEY</key>
 # <string>your-twitterapi-key</string>
+# <key>XQUIK_API_KEY</key>
+# <string>your-xquik-api-key</string>
 
 # Then restart the gateway:
 launchctl kickstart -k gui/$(id -u)/ai.openclaw.gateway
@@ -234,6 +236,7 @@ export GEMINI_API_KEY="your-key"
 export OPENROUTER_API_KEY="your-key"
 export GH_TOKEN="your-token"
 export TAVILY_API_KEY="your-key"
+export XQUIK_API_KEY="your-key"
 ```
 
 ### Step 6: Create the Cron Job
@@ -309,6 +312,15 @@ Scans official AI company accounts, tech reporters/leakers, and CEO accounts usi
 
 ### 5. `fetch_twitter_api.py` - X/Twitter API Keyword Search
 Supplements bird CLI with keyword-based search. Defaults to twitterapi.io when `TWITTERAPI_IO_KEY` is set; run with `--provider xquik` and `XQUIK_API_KEY` to use Xquik instead. Uses engagement filtering (50+ likes or 5000+ followers) to cut noise. Properly tags tweet-only stories (no external article URL).
+
+**Optional OpenClaw plugin path:** If your agent already uses OpenClaw plugins, install [TweetClaw](https://github.com/Xquik-dev/tweetclaw) for richer X/Twitter workflows around this scanner:
+
+```bash
+openclaw plugins install @xquik/tweetclaw
+openclaw config set plugins.entries.tweetclaw.config.apiKey "$XQUIK_API_KEY"
+```
+
+Use TweetClaw when you need search tweets, search tweet replies, follower export, user lookup, media download, monitor tweets, webhooks, giveaway draws, or human-reviewed post tweets and post tweet replies. Keep this scanner responsible for scheduled news collection and curation, then pass only reviewed tweet URLs, tweet IDs, accounts, queries, summaries, and selection reasons into your editorial profile or manual follow-up notes.
 
 ### 6. `github_trending.py` — GitHub Trending + Releases
 Three strategies:
@@ -408,7 +420,7 @@ openclaw-news-scan/
 │   ├── filter_ai_news.sh                 # RSS keyword filter (standalone)
 │   ├── fetch_reddit_news.py              # Reddit JSON API
 │   ├── scan_twitter_ai.sh               # Twitter bird CLI
-│   ├── fetch_twitter_api.py              # twitterapi.io search
+│   ├── fetch_twitter_api.py              # twitterapi.io or Xquik search
 │   ├── github_trending.py               # GitHub trending + releases
 │   ├── fetch_web_news.py                # Tavily web search
 │   ├── update_editorial_profile.py      # Editorial profile updater
