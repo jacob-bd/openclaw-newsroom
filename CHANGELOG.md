@@ -4,6 +4,19 @@ All notable changes to the OpenClaw News Scanner pipeline are documented here.
 
 ---
 
+## [v2.3] — 2026-05-24
+
+### Added: TweetClaw Newsroom Integration & Documentation Improvements
+
+**What changed:**
+
+- **TweetClaw Integration Guide** — Added detailed instructions for integrating the `@xquik/tweetclaw` plugin to handle advanced X/Twitter workflows (like replies, user lookup, giveaway draws, and human-reviewed posting) in tandem with the scheduled scanner.
+- **Updated RSS Feeds** — Replaced stale/broken starter RSS feed URLs with highly reliable and active BBC Technology and Guardian AI feeds.
+- **Improved Environment Setup** — Added setup and LaunchAgent configuration guidelines for `XQUIK_API_KEY`.
+- A huge **thank you** to [@kriptoburak](https://github.com/kriptoburak) for contributing these excellent documentation and workflow improvements!
+
+---
+
 ## [v2.2] — 2026-05-18
 
 ### Added: Xquik Twitter Search Provider
